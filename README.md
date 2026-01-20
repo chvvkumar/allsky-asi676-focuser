@@ -93,6 +93,9 @@ Both implementations share these core capabilities:
 
 **Important:** Connect the motor power supply GND to the microcontroller/Pi GND to establish a common ground.
 
+### Pi5 Circuit Diagram
+![Pi5 Circuit Diagram](images/Pi%20Circuit%20Diagram.png)
+
 ## 3D Printed Parts
 
 The 3D print files for the main camera gear and the camera mount are available on Printables:

@@ -42,7 +42,10 @@ A feature-rich stepper motor focus controller firmware for XIAO ESP32-S3 microco
 | IN1           | GPIO 1        | Orange               |
 | IN2           | GPIO 2        | Yellow               |
 | IN3           | GPIO 3        | Pink                 |
-| IN4           | GPIO 4        | Blue                 |
+| IN4         | GPIO 4        | Blue                 |
+
+### Circuit Diagram
+![ESP32 Circuit Diagram](../images/ESP32%20Circuit%20Diagram.png)
 
 **Power Connections:**
 - ULN2003 VCC → 12V power supply

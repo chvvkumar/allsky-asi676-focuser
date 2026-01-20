@@ -42,7 +42,10 @@ A Flask-based web service for controlling stepper motor focus on Raspberry Pi 5,
 | IN1           | GPIO 26       | Pin 37       | Orange               |
 | IN2           | GPIO 19       | Pin 35       | Yellow               |
 | IN3           | GPIO 13       | Pin 33       | Pink                 |
-| IN4           | GPIO 6        | Pin 31       | Blue                 |
+| IN4         | GPIO 6        | Pin 31       | Blue                 |
+
+### Circuit Diagram
+![Pi5 Circuit Diagram](../images/Pi%20Circuit%20Diagram.png)
 
 **Power Connections:**
 - ULN2003 VCC → 12V power supply
