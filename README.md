@@ -6,6 +6,32 @@ A collection of stepper motor focus controllers designed for AllSky camera syste
   <img src="./images/Render.png" alt="Render of the focuser" width="800"/>
 </div>
 
+
+
+<div align="center">
+  <h3>Web Interface Demo (YouTube)</h3>
+  <a href="https://youtu.be/qwrPY6xvNLg">
+    <img src="https://img.youtube.com/vi/qwrPY6xvNLg/0.jpg" alt="Web Interface Demo" width="800"/>
+  </a>
+</div>
+
+## Table of Contents
+- [Repository Overview](#repository-overview)
+- [Common Features](#common-features)
+- [Hardware Requirements](#hardware-requirements)
+- [3D Printed Parts](#3d-printed-parts)
+- [Quick Start](#quick-start)
+- [API Endpoints](#api-endpoints)
+- [Web Interface Features](#web-interface-features)
+- [Default Configuration](#default-configuration)
+- [Version Selection Guide](#version-selection-guide)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+- [Related Projects](#related-projects)
+- [Safety Notes](#safety-notes)
+- [Troubleshooting](#troubleshooting)
+
 ## Repository Overview
 
 This repository provides two separate but compatible focus controller implementations:
@@ -67,6 +93,12 @@ Both implementations share these core capabilities:
 
 **Important:** Connect the motor power supply GND to the microcontroller/Pi GND to establish a common ground.
 
+## 3D Printed Parts
+
+The 3D print files for the main camera gear and the camera mount are available on Printables:
+
+- [ZWO ASI676MC AllSky Focusing Mount and Gear](https://www.printables.com/model/1563632-zwo-asi676mc-allsky-focusing-mount-and-gear)
+
 ## Quick Start
 
 ### ESP32 Version
@@ -114,6 +146,8 @@ ws://esp32-ip:81
 ```
 
 ## Web Interface Features
+
+See it in action: [Web Interface Demo](https://youtu.be/qwrPY6xvNLg)
 
 Both versions include a modern web interface with:
 - **Real-time Position Display**: Visual gauge and numeric display
