@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Lens Controller v2.0</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+        
+        :root {
+            --bg: #050505;
+            --surface: #121212;
+            --surface-light: #1e1e1e;
+            --primary: #e11d48; /* Rose-600 */
+            --primary-dim: #9f1239;
+            --accent: #3b82f6; /* Blue-500 */
+            --text-main: #f1f5f9;
+            --text-muted: #64748b;
+            --danger: #ef4444;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --radius: 16px;
+            --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+        }
+
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .app-container {
+            width: 100%;
+            max-width: 1600px;
+            display: grid;
+            gap: 24px;
+            /* Default Mobile: 1 column */
+            grid-template-columns: 1fr;
+        }
+
+        @media (min-width: 1200px) {
+            .app-container {
+                /* Left (Focus) | Center (Video) | Right (Camera) */
+                grid-template-columns: 350px 1fr 350px;
+                align-items: start;
+            }
+        }
+
+        .left-col, .right-col {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .graphic-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 10px;
+            box-shadow: var(--shadow);
+            border: 1px solid #222;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 400px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        #camStream {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            border-radius: 8px;
+            background: #000;
+            cursor: grab;
+            transform-origin: center;
+            transition: transform 0.05s linear; /* Smooth but fast updates */
+        }
+        #camStream:active { cursor: grabbing; }
+        
+        .stream-placeholder {
+            position: absolute;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            z-index: 0;
+        }
+
+        /* --- Header & Status --- */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 5px;
+        }
+        
+        .connection-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--surface-light);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; transition: all 0.3s; }
+        .dot.active { background: var(--success); box-shadow: 0 0 8px var(--success); }
+        .dot.warning { background: var(--warning); }
+
+        .main-display {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 30px 20px;
+            text-align: center;
+            box-shadow: var(--shadow);
+            position: relative;
+            overflow: hidden;
+            border: 1px solid #222;
+        }
+        
+        .display-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--text-muted);
+            margin-bottom: 5px;
+        }
+        
+        .display-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 3.5rem;
+            font-weight: 700;
+            color: var(--text-main);
+            line-height: 1;
+            margin-bottom: 5px;
+            text-shadow: 0 0 20px rgba(255,255,255,0.1);
+        }
+        
+        .display-target {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-top: 25px;
+            position: relative;
+            height: 24px;
+        }
+        .progress-track {
+            background: var(--surface-light);
+            height: 8px;
+            border-radius: 4px;
+            position: relative;
+            top: 8px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, var(--primary-dim), var(--primary));
+            height: 100%;
+            width: 50%; /* Start center */
+            position: absolute;
+            transition: all 0.2s ease-out;
+            border-radius: 4px;
+        }
+        .limit-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 12px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* --- Control Deck --- */
+        .control-deck {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 20px;
+            box-shadow: var(--shadow);
+            border: 1px solid #222;
+        }
+
+        .deck-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        /* Speed Slider */
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 25px;
+            background: var(--surface-light);
+            padding: 10px 15px;
+            border-radius: 12px;
+        }
+        .speed-val {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--primary);
+            width: 50px;
+            text-align: right;
+        }
+        input[type="range"] {
+            flex: 1;
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 22px;
+            height: 22px;
+            background: #e2e8f0;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+
+        /* Button Grid */
+        .btn-group-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-align: center;
+        }
+
+        .nudge-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .btn-nudge {
+            background: var(--surface-light);
+            border: none;
+            color: var(--text-main);
+            padding: 15px 0;
+            border-radius: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.1s;
+            box-shadow: 0 2px 0 rgba(0,0,0,0.2);
+        }
+        .btn-nudge:active {
+            transform: translateY(2px);
+            box-shadow: none;
+            background: var(--primary-dim);
+        }
+        .btn-nudge.fine {
+            background: rgba(255, 255, 255, 0.05);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .btn-nudge.fine:active { color: var(--text-main); background: var(--primary-dim); }
+
+        /* Emergency Stop */
+        .btn-stop {
+            width: 100%;
+            background: var(--danger);
+            color: white;
+            border: none;
+            padding: 18px;
+            border-radius: 12px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(239, 68, 68, 0.3);
+            transition: transform 0.1s;
+        }
+        .btn-stop:active { transform: scale(0.98); opacity: 0.9; }
+
+        /* --- Tools & Presets --- */
+        .tools-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 10px;
+        }
+        .btn-tool {
+            background: var(--surface);
+            border: 1px solid var(--surface-light);
+            color: var(--text-muted);
+            padding: 15px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .btn-tool:hover { background: var(--surface-light); color: var(--text-main); }
+        .btn-tool.danger-text { color: var(--danger); }
+        
+        /* Settings Drawer */
+        .settings-toggle {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            padding: 20px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .settings-drawer {
+            height: 0;
+            overflow: hidden;
+            transition: height 0.3s ease;
+            background: var(--surface);
+            border-radius: var(--radius);
+        }
+        .settings-drawer.open { height: auto; border: 1px solid #222; }
+        .settings-inner { padding: 20px; }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        input[type="number"] {
+            background: var(--bg);
+            border: 1px solid var(--surface-light);
+            color: var(--text-main);
+            padding: 12px;
+            border-radius: 8px;
+            flex: 1;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .btn-go { background: var(--accent); color: white; border: none; padding: 0 20px; border-radius: 8px; font-weight: 700; cursor: pointer; }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-100%);
+            background: var(--surface-light);
+            padding: 12px 24px;
+            border-radius: 30px;
+            border: 1px solid var(--surface-light);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 100;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .toast.show { transform: translateX(-50%) translateY(0); }
+        .toast.success { border-color: var(--success); color: var(--success); }
+        .toast.error { border-color: var(--danger); color: var(--danger); }
+
+    </style>
+</head>
+<body>
+    
+    <div class="toast" id="toast"></div>
+
+    <div class="app-container">
+        
+        <!-- Left Column: Controls (Focus) -->
+        <div class="left-col">
+            <!-- Header -->
+            <div class="header">
+                <div style="font-weight: 800; letter-spacing: -0.5px; font-size: 1.1rem;">AllSky <span style="color:var(--primary)">Focus</span></div>
+                <div class="connection-pill">
+                    <div class="dot" id="wsDot"></div>
+                    <span id="wsStatus">Init...</span>
+                </div>
+            </div>
+
+            <!-- Main Display -->
+            <div class="main-display">
+                <div class="display-label">Current Position</div>
+                <div class="display-value" id="posDisp">0</div>
+                <div class="display-target">Target: <span id="targetDisp">0</span></div>
+
+                <div class="progress-container">
+                    <div class="progress-track">
+                        <div class="progress-fill" id="posBar"></div>
+                        <!-- Center Marker -->
+                        <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.1);"></div>
+                    </div>
+                    <div class="limit-labels">
+                        <span id="minLabel">-20k</span>
+                        <span id="maxLabel">+20k</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Focuser Control Deck -->
+            <div class="control-deck">
+                <div class="deck-header">
+                    <span>FOCUS CONTROL</span>
+                    <span style="font-size: 0.7rem; color: var(--success); opacity: 0;" id="runningIndicator">● RUNNING</span>
+                </div>
+
+                <!-- Speed -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">SPEED</span>
+                    <input type="range" id="speedSlider" min="50" max="600" step="10" onchange="commitSpeed()" oninput="previewSpeed(this.value)">
+                    <span class="speed-val" id="speedVal">250</span>
+                </div>
+
+                <!-- Buttons -->
+                <div class="btn-group-label">Fine Adjustment</div>
+                <div class="nudge-grid">
+                    <button class="btn-nudge fine" onclick="nudge(-10)">&lt;&lt;</button>
+                    <button class="btn-nudge fine" onclick="nudge(-1)">&lt;</button>
+                    <button class="btn-nudge fine" onclick="nudge(1)">&gt;</button>
+                    <button class="btn-nudge fine" onclick="nudge(10)">&gt;&gt;</button>
+                </div>
+
+                <div class="btn-group-label">Coarse Travel</div>
+                <div class="nudge-grid">
+                    <button class="btn-nudge" onclick="nudge(-1000)">-1k</button>
+                    <button class="btn-nudge" onclick="nudge(-100)">-100</button>
+                    <button class="btn-nudge" onclick="nudge(100)">+100</button>
+                    <button class="btn-nudge" onclick="nudge(1000)">+1k</button>
+                </div>
+
+                <button class="btn-stop" onclick="stopMotor()">STOP MOTOR</button>
+            </div>
+
+            <!-- Utilities -->
+            <div class="tools-grid">
+                <button class="btn-tool" onclick="goToZero()">Go Home (0)</button>
+                <button class="btn-tool danger-text" onclick="setZero()">Set Zero Here</button>
+            </div>
+
+            <!-- Settings Toggle -->
+            <div class="settings-toggle" onclick="toggleSettings()">Advanced Configuration ▼</div>
+            
+            <div class="settings-drawer" id="settingsDrawer">
+                <div class="settings-inner">
+                    <div class="display-label" style="margin-bottom: 10px;">Go To Absolute</div>
+                    <div class="input-row">
+                        <input type="number" id="gotoInput" placeholder="Position...">
+                        <button class="btn-go" onclick="goToPos()">GO</button>
+                    </div>
+
+                    <div class="display-label" style="margin-bottom: 10px;">Max Limit (+/-)</div>
+                    <div class="input-row">
+                        <input type="number" id="maxInput" placeholder="20000">
+                        <button class="btn-tool" style="padding: 12px;" onclick="saveCfg('max')">Save</button>
+                    </div>
+
+                    <div class="display-label" style="margin-bottom: 10px;">Steps / Rotation</div>
+                    <div class="input-row">
+                        <input type="number" id="stepsRotInput" placeholder="4096">
+                        <button class="btn-tool" style="padding: 12px;" onclick="saveCfg('rot')">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Column: Video Stream -->
+        <div class="graphic-card">
+            <span class="stream-placeholder">Video Stream Loading...</span>
+            <!-- Image source is set via JS to allow correct port -->
+            <img id="camStream" alt="Camera Stream" style="z-index: 10;">
+        </div>
+
+        <!-- Right Column: Camera Controls -->
+        <div class="right-col">
+            <!-- Camera Control Deck -->
+            <div class="control-deck">
+                <div class="deck-header">
+                    <span>CAMERA CONTROL</span>
+                    <span id="camStatus" style="font-size: 0.7rem; color: var(--text-muted);">CONNECTING...</span>
+                </div>
+                
+                <!-- Gain -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">GAIN</span>
+                    <input type="range" id="camGain" min="0" max="600" value="300" onchange="setCamSettings()" oninput="$('gainVal').textContent=this.value">
+                    <span class="speed-val" id="gainVal">300</span>
+                </div>
+
+                <!-- Exposure -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">EXP (ms)</span>
+                    <input type="range" id="camExp" min="1" max="5000" value="100" onchange="setCamSettings()" oninput="$('expVal').textContent=this.value">
+                    <span class="speed-val" id="expVal">100</span>
+                </div>
+
+                <!-- Quality -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">QUALITY</span>
+                    <input type="range" id="camQuality" min="10" max="100" value="20" onchange="setCamSettings()" oninput="$('qualVal').textContent=this.value">
+                    <span class="speed-val" id="qualVal">20</span>
+                </div>
+
+                <!-- Resolution -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">RESOLUTION</span>
+                    <select id="camResolution" onchange="setCamSettings()" style="flex: 1; background: var(--bg); border: 1px solid var(--surface-light); color: var(--text-main); padding: 8px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; cursor: pointer;">
+                        <option value="3840x2160">4K (3840x2160)</option>
+                        <option value="1920x1080">FHD (1920x1080)</option>
+                        <option value="1280x720">HD (1280x720)</option>
+                        <option value="640x480">SD (640x480)</option>
+                        <option value="320x240" selected>Low (320x240)</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- View Control Deck (New) -->
+            <div class="control-deck">
+                <div class="deck-header">
+                    <span>VIEW CONTROL</span>
+                    <button class="btn-tool" style="padding: 4px 10px; font-size: 0.7rem;" onclick="resetView()">RESET</button>
+                </div>
+                
+                <!-- Zoom -->
+                <div class="speed-control">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">ZOOM</span>
+                    <input type="range" id="viewZoom" min="100" max="500" value="100" step="10" oninput="updateView()">
+                    <span class="speed-val" id="zoomVal">1.0x</span>
+                </div>
+                 <div style="font-size: 0.75rem; color: var(--text-muted); text-align: center;">
+                    Drag image to Pan
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- State & Utils ---
+        const $ = id => document.getElementById(id);
+        const vib = () => { if(navigator.vibrate) navigator.vibrate(10); };
+        let currentData = {};
+
+        // --- CAMERA CONFIG ---
+        const CAM_PORT = 5000;
+        const getCamUrl = (path) => `http://${window.location.hostname}:${CAM_PORT}${path}`;
+
+        function initStream() {
+            const img = $('camStream');
+            img.src = getCamUrl('/video_feed');
+            
+            img.onerror = () => {
+                $('camStatus').textContent = "CONNECTION FAILED";
+                $('camStatus').style.color = "var(--danger)";
+            };
+
+            img.onload = () => {
+                $('camStatus').textContent = "ONLINE";
+                $('camStatus').style.color = "var(--success)";
+            };
+
+            // Pan/Zoom Events
+            img.addEventListener('mousedown', startPan);
+            img.addEventListener('touchstart', startPan, {passive: false});
+            window.addEventListener('mousemove', doPan);
+            window.addEventListener('touchmove', doPan, {passive: false});
+            window.addEventListener('mouseup', endPan);
+            window.addEventListener('touchend', endPan);
+        }
+
+        function setCamSettings() {
+            const gain = parseInt($('camGain').value);
+            const exp = parseInt($('camExp').value);
+            const qual = parseInt($('camQuality').value);
+            const resolution = $('camResolution').value.split('x');
+            const width = parseInt(resolution[0]);
+            const height = parseInt(resolution[1]);
+            
+            fetch(getCamUrl('/update_settings'), {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    gain: gain,
+                    exposure_val: exp,
+                    exposure_mode: 'ms',
+                    quality: qual,
+                    resolution_width: width,
+                    resolution_height: height
+                })
+            }).catch(e => showToast('Camera Error', 'error'));
+        }
+
+        // --- VIEW CONTROL (Pan/Zoom) ---
+        let zoomLevel = 1.0;
+        let panX = 0;
+        let panY = 0;
+        let isPanning = false;
+        let startX = 0;
+        let startY = 0;
+
+        function updateView() {
+            const sliderVal = $('viewZoom').value;
+            zoomLevel = parseInt(sliderVal) / 100;
+            $('zoomVal').textContent = zoomLevel.toFixed(1) + 'x';
+            applyTransform();
+        }
+
+        function resetView() {
+            zoomLevel = 1.0;
+            panX = 0;
+            panY = 0;
+            $('viewZoom').value = 100;
+            updateView();
+        }
+
+        function applyTransform() {
+            const img = $('camStream');
+            img.style.transform = `scale(${zoomLevel}) translate(${panX}px, ${panY}px)`;
+        }
+
+        function startPan(e) {
+            if (zoomLevel <= 1.0) return;
+            e.preventDefault();
+            isPanning = true;
+            const pt = e.touches ? e.touches[0] : e;
+            startX = pt.clientX - panX * zoomLevel; // Adjust for current scale
+            startY = pt.clientY - panY * zoomLevel;
+            $('camStream').style.cursor = 'grabbing';
+        }
+
+        function doPan(e) {
+            if (!isPanning) return;
+            e.preventDefault();
+            const pt = e.touches ? e.touches[0] : e;
+            
+            // Calculate delta
+            const currentX = pt.clientX;
+            const currentY = pt.clientY;
+
+            // Update pan
+            // We divide by zoomLevel to keep pan speed consistent with mouse movement relative to screen
+            panX = (currentX - startX) / zoomLevel;
+            panY = (currentY - startY) / zoomLevel;
+
+            applyTransform();
+        }
+
+        function endPan() {
+            isPanning = false;
+            if($('camStream')) $('camStream').style.cursor = 'grab';
+        }
+
+
+        // --- UI Updates ---
+        function updateUI(data) {
+            currentData = data;
+            
+            // Text Updates
+            $('posDisp').textContent = data.position;
+            $('targetDisp').textContent = data.target;
+            
+            // Running Indicator
+            $('runningIndicator').style.opacity = data.running ? '1' : '0';
+            
+            // Progress Bar Logic
+            // 0 is center (50%). -Max is 0%. +Max is 100%.
+            const max = data.maxSteps || 20000;
+            $('maxLabel').textContent = '+' + (max/1000).toFixed(1) + 'k';
+            $('minLabel').textContent = '-' + (max/1000).toFixed(1) + 'k';
+            
+            const range = max * 2;
+            const zeroOffset = max; // 0 is at 'max' distance from start of range
+            const currentInAbsolute = data.position + zeroOffset; // shift so -20000 is 0
+            
+            let pct = (currentInAbsolute / range) * 100;
+            pct = Math.max(0, Math.min(100, pct)); // Clamp
+            
+            const bar = $('posBar');
+            // To make it grow from center:
+            if (pct >= 50) {
+                bar.style.left = '50%';
+                bar.style.width = (pct - 50) + '%';
+            } else {
+                bar.style.left = pct + '%';
+                bar.style.width = (50 - pct) + '%';
+            }
+            
+            // Inputs (only if not focused)
+            if (document.activeElement !== $('speedSlider')) {
+                $('speedSlider').value = data.speed;
+                $('speedVal').textContent = data.speed;
+            }
+            if (document.activeElement !== $('maxInput')) $('maxInput').value = data.maxSteps;
+            if (document.activeElement !== $('stepsRotInput')) $('stepsRotInput').value = data.stepsPerRot;
+        }
+
+        // --- API & Polling ---
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                updateUI(data);
+                updateConn(true);
+            } catch (e) {
+                updateConn(false);
+            }
+        }
+
+        function updateConn(active) {
+            const dot = $('wsDot');
+            const txt = $('wsStatus');
+            if(active) {
+                dot.classList.add('active');
+                txt.textContent = 'ONLINE';
+                txt.style.color = 'var(--success)';
+            } else {
+                dot.classList.remove('active');
+                txt.textContent = 'OFFLINE';
+                txt.style.color = 'var(--text-muted)';
+            }
+        }
+
+        setInterval(fetchStatus, 200);
+
+        async function apiCall(endpoint, method = 'POST', body = null, key = null) {
+            try {
+                const opts = { method, headers: {'Content-Type': 'application/json'} };
+                if(body !== null) opts.body = JSON.stringify({ [key]: body });
+                
+                const res = await fetch(endpoint, opts);
+                const data = await res.json();
+                
+                if(data.status === 'success') showToast(data.message, 'success');
+                else showToast(data.message || 'Error', 'error');
+                
+                fetchStatus();
+            } catch(e) {
+                showToast('Command Failed', 'error');
+            }
+        }
+
+        // --- Actions ---
+        function nudge(steps) { vib(); apiCall('/api/nudge', 'POST', steps, 'steps'); }
+        function stopMotor() { vib(); apiCall('/api/stop', 'POST'); }
+        function goToZero() { vib(); apiCall('/api/position', 'POST', 0, 'position'); }
+        
+        function setZero() { 
+            if(confirm('Set current position as NEW ZERO?')) apiCall('/api/zero', 'POST'); 
+        }
+        
+        function commitSpeed() {
+            const val = $('speedSlider').value;
+            apiCall('/api/speed', 'POST', parseInt(val), 'speed');
+        }
+        
+        function previewSpeed(val) { $('speedVal').textContent = val; }
+        
+        function goToPos() {
+            const val = $('gotoInput').value;
+            if(val) apiCall('/api/position', 'POST', parseInt(val), 'position');
+        }
+        
+        function saveCfg(type) {
+            if(type === 'max') apiCall('/api/settings/max', 'POST', parseInt($('maxInput').value), 'maxSteps');
+            if(type === 'rot') apiCall('/api/settings/stepsperrot', 'POST', parseInt($('stepsRotInput').value), 'stepsPerRot');
+        }
+
+        function toggleSettings() {
+            $('settingsDrawer').classList.toggle('open');
+        }
+
+        function showToast(msg, type) {
+            const t = $('toast');
+            t.textContent = msg;
+            t.className = `toast show ${type}`;
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+
+        // Init
+        fetchStatus();
+        initStream(); // Start Camera connection
+    </script>
+</body>
+</html>

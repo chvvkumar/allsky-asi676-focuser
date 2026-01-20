@@ -1,0 +1,385 @@
+/*
+ * XIAO ESP32-S3 Focus Controller
+ * ULN2003 Driver with Web Interface and OTA Updates
+ * * Pin Connections (based on XIAO ESP32S3 and 28BYJ-48 Stepper Motor):
+ * - GPIO1 -> ULN2003 IN1 (pin_a)
+ * - GPIO2 -> ULN2003 IN2 (pin_b)
+ * - GPIO3 -> ULN2003 IN3 (pin_c)
+ * - GPIO4 -> ULN2003 IN4 (pin_d)
+ */
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ElegantOTA.h>
+#include <Preferences.h>
+#include "web_interface.h"
+
+// ----------------------------------------------------------------
+// WiFi Configuration
+// ----------------------------------------------------------------
+const char* WIFI_SSID = "IoT";              // Change to your WiFi SSID
+const char* WIFI_PASSWORD = "kkkkkkkk";     // Change to your WiFi password
+
+// Access Point credentials (fallback)
+const char* AP_SSID = "StepperMotorAP";
+const char* AP_PASSWORD = "kkkkkkkk";
+
+// ----------------------------------------------------------------
+// Stepper Motor Pin Configuration (ULN2003)
+// ----------------------------------------------------------------
+#define PIN_A GPIO_NUM_1
+#define PIN_B GPIO_NUM_2
+#define PIN_C GPIO_NUM_3
+#define PIN_D GPIO_NUM_4
+
+// ----------------------------------------------------------------
+// Motor Configuration
+// ----------------------------------------------------------------
+int maxSteps = 20000;           // Maximum steps from ZERO (Radius of travel)
+int stepsPerRotation = 4096;    // Steps per full rotation (configurable)
+const int DEFAULT_SPEED = 100;  // Default speed (steps/s)
+const int MIN_SPEED = 50;
+const int MAX_SPEED = 600;
+
+// ----------------------------------------------------------------
+// ULN2003 Half-Step Sequence (8 steps per full step)
+// ----------------------------------------------------------------
+const int STEPS_IN_SEQUENCE = 8;
+const int stepSequence[8][4] = {
+  {1, 0, 0, 0},
+  {1, 1, 0, 0},
+  {0, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 0},
+  {0, 0, 1, 1},
+  {0, 0, 0, 1},
+  {1, 0, 0, 1}
+};
+
+// ----------------------------------------------------------------
+// Global Variables
+// ----------------------------------------------------------------
+WebServer server(80);
+Preferences preferences;
+
+int currentPosition = 0;
+int targetPosition = 0;
+int motorSpeed = DEFAULT_SPEED;
+int sequenceIndex = 0;
+unsigned long lastStepTime = 0;
+bool motorRunning = false;
+bool wifiConnected = false;
+
+// ----------------------------------------------------------------
+// Function Prototypes
+// ----------------------------------------------------------------
+void setupWiFi();
+void setupWebServer();
+void handleRoot();
+void handleAPI();
+void handleSetPosition();
+void handleSetSpeed();
+void handleNudge();
+void handleZero();
+void handleReboot();
+void handleGetStatus();
+void handleSetMaxSteps();
+void handleSetStepsPerRotation();
+void stepMotor(int direction);
+void updateMotor();
+void setStepperPins(int a, int b, int c, int d);
+void stopMotor();
+String getHTML();
+
+// ----------------------------------------------------------------
+// Setup
+// ----------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n\nXIAO ESP32-S3 Focus Controller");
+  Serial.println("====================================");
+
+  // Initialize preferences
+  preferences.begin("stepper", false);
+  currentPosition = preferences.getInt("position", 0);
+  motorSpeed = preferences.getInt("speed", DEFAULT_SPEED);
+  maxSteps = preferences.getInt("maxSteps", 20000);
+  stepsPerRotation = preferences.getInt("stepsPerRot", 4096);
+  
+  // Configure stepper motor pins
+  pinMode(PIN_A, OUTPUT);
+  pinMode(PIN_B, OUTPUT);
+  pinMode(PIN_C, OUTPUT);
+  pinMode(PIN_D, OUTPUT);
+
+  // Turn off all coils initially
+  stopMotor();
+  
+  // Setup WiFi
+  setupWiFi();
+  
+  // Setup Web Server
+  setupWebServer();
+
+  // Initialize ElegantOTA
+  ElegantOTA.begin(&server);
+  Serial.println("ElegantOTA initialized");
+  
+  // Start web server
+  server.begin();
+  Serial.println("Web server started");
+  Serial.print("Access at: http://");
+  Serial.println(WiFi.localIP());
+}
+
+// ----------------------------------------------------------------
+// Main Loop
+// ----------------------------------------------------------------
+void loop() {
+  server.handleClient();
+  ElegantOTA.loop();
+  updateMotor();
+
+  // Check WiFi connection and reconnect if needed
+  static unsigned long lastWiFiCheck = 0;
+  if (millis() - lastWiFiCheck > 30000) { // Check every 30 seconds
+    lastWiFiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED && wifiConnected) {
+      Serial.println("WiFi connection lost, attempting to reconnect...");
+      setupWiFi();
+    }
+  }
+}
+
+// ----------------------------------------------------------------
+// WiFi Setup with Fallback to AP Mode
+// ----------------------------------------------------------------
+void setupWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    // Fallback to Access Point mode
+    wifiConnected = false;
+    Serial.println("\nWiFi connection failed. Starting Access Point...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    Serial.print("AP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.println("Connect to AP and access: http://192.168.4.1");
+  }
+}
+
+// ----------------------------------------------------------------
+// Web Server Setup
+// ----------------------------------------------------------------
+void setupWebServer() {
+  server.on("/", handleRoot);
+  server.on("/api/status", handleGetStatus);
+  server.on("/api/position", HTTP_POST, handleSetPosition);
+  server.on("/api/speed", HTTP_POST, handleSetSpeed);
+  server.on("/api/nudge", HTTP_POST, handleNudge);
+  server.on("/api/zero", HTTP_POST, handleZero);
+  server.on("/api/reboot", HTTP_POST, handleReboot);
+  server.on("/api/settings/max", HTTP_POST, handleSetMaxSteps);
+  server.on("/api/settings/stepsperrot", HTTP_POST, handleSetStepsPerRotation);
+  server.on("/api/stop", HTTP_POST, []() {
+    targetPosition = currentPosition;
+    server.send(200, "application/json", "{\"success\":true}");
+  });
+}
+
+// ----------------------------------------------------------------
+// Web Server Handlers
+// ----------------------------------------------------------------
+void handleRoot() {
+  server.send(200, "text/html", getHTML());
+}
+
+void handleGetStatus() {
+  // Symmetrical limits means range is from -maxSteps to +maxSteps.
+  // Total range width = 2 * maxSteps.
+  // We offset currentPosition by maxSteps to get a 0-based value for calculation.
+  float rangeWidth = 2.0 * (float)maxSteps;
+  float position = ((float)currentPosition + (float)maxSteps) / rangeWidth;
+
+  // Clamp visually just in case, though motor logic limits it too
+  if (position < 0.0) position = 0.0;
+  if (position > 1.0) position = 1.0;
+  
+  String json = "{";
+  json += "\"position\":" + String(currentPosition) + ",";
+  json += "\"target\":" + String(targetPosition) + ",";
+  json += "\"percentage\":" + String(position * 100, 1) + ",";
+  json += "\"speed\":" + String(motorSpeed) + ",";
+  json += "\"maxSteps\":" + String(maxSteps) + ",";
+  json += "\"stepsPerRot\":" + String(stepsPerRotation) + ",";
+  json += "\"running\":" + String(motorRunning ? "true" : "false");
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleSetPosition() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int pos = body.toInt();
+    
+    // Constrain to symmetrical limits: -maxSteps to +maxSteps
+    if (pos < -maxSteps) pos = -maxSteps;
+    if (pos > maxSteps) pos = maxSteps;
+    
+    targetPosition = pos;
+    server.send(200, "application/json", "{\"success\":true,\"target\":" + String(targetPosition) + "}");
+  } else {
+    server.send(400, "application/json", "{\"error\":\"No position provided\"}");
+  }
+}
+
+void handleSetSpeed() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int speed = body.toInt();
+    if (speed < MIN_SPEED) speed = MIN_SPEED;
+    if (speed > MAX_SPEED) speed = MAX_SPEED;
+    
+    motorSpeed = speed;
+    preferences.putInt("speed", motorSpeed);
+    server.send(200, "application/json", "{\"success\":true,\"speed\":" + String(motorSpeed) + "}");
+  } else {
+    server.send(400, "application/json", "{\"error\":\"No speed provided\"}");
+  }
+}
+
+void handleSetMaxSteps() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int val = body.toInt();
+    if (val > 0) {
+      maxSteps = val;
+      preferences.putInt("maxSteps", maxSteps);
+      server.send(200, "application/json", "{\"success\":true,\"maxSteps\":" + String(maxSteps) + "}");
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Invalid value\"}");
+    }
+  }
+}
+
+void handleSetStepsPerRotation() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int val = body.toInt();
+    if (val > 0) {
+      stepsPerRotation = val;
+      preferences.putInt("stepsPerRot", stepsPerRotation);
+      server.send(200, "application/json", "{\"success\":true,\"stepsPerRot\":" + String(stepsPerRotation) + "}");
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Invalid value\"}");
+    }
+  }
+}
+
+void handleNudge() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int steps = body.toInt();
+    int newPos = currentPosition + steps;
+    
+    // Constrain to symmetrical limits: -maxSteps to +maxSteps
+    if (newPos < -maxSteps) newPos = -maxSteps;
+    if (newPos > maxSteps) newPos = maxSteps;
+    
+    targetPosition = newPos;
+    server.send(200, "application/json", "{\"success\":true,\"target\":" + String(targetPosition) + "}");
+  } else {
+    server.send(400, "application/json", "{\"error\":\"No steps provided\"}");
+  }
+}
+
+void handleZero() {
+  currentPosition = 0;
+  targetPosition = 0;
+  preferences.putInt("position", currentPosition);
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleReboot() {
+  server.send(200, "application/json", "{\"success\":true,\"message\":\"Rebooting...\"}");
+  delay(500); // Give time for response to be sent
+  ESP.restart();
+}
+
+// ----------------------------------------------------------------
+// Motor Control Functions
+// ----------------------------------------------------------------
+void updateMotor() {
+  if (currentPosition == targetPosition) {
+    if (motorRunning) {
+      stopMotor();
+      motorRunning = false;
+      preferences.putInt("position", currentPosition);
+    }
+    return;
+  }
+  
+  motorRunning = true;
+  unsigned long stepDelay = 1000000 / motorSpeed; // microseconds
+  
+  if (micros() - lastStepTime >= stepDelay) {
+    lastStepTime = micros();
+    int direction = (targetPosition > currentPosition) ? 1 : -1;
+    stepMotor(direction);
+    currentPosition += direction;
+  }
+}
+
+void stepMotor(int direction) {
+  sequenceIndex += direction;
+  
+  if (sequenceIndex >= STEPS_IN_SEQUENCE) {
+    sequenceIndex = 0;
+  } else if (sequenceIndex < 0) {
+    sequenceIndex = STEPS_IN_SEQUENCE - 1;
+  }
+  
+  setStepperPins(
+    stepSequence[sequenceIndex][0],
+    stepSequence[sequenceIndex][1],
+    stepSequence[sequenceIndex][2],
+    stepSequence[sequenceIndex][3]
+  );
+}
+
+void setStepperPins(int a, int b, int c, int d) {
+  digitalWrite(PIN_A, a);
+  digitalWrite(PIN_B, b);
+  digitalWrite(PIN_C, c);
+  digitalWrite(PIN_D, d);
+}
+
+void stopMotor() {
+  // Turn off all coils to save power
+  digitalWrite(PIN_A, LOW);
+  digitalWrite(PIN_B, LOW);
+  digitalWrite(PIN_C, LOW);
+  digitalWrite(PIN_D, LOW);
+}
+
+// ----------------------------------------------------------------
+// HTML Interface
+// ----------------------------------------------------------------
+String getHTML() {
+  return String(HTML_PAGE);
+}
