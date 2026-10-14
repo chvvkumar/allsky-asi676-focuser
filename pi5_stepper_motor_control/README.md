@@ -329,7 +329,9 @@ The ROI is sent as normalized `x`, `y`, `w`, `h` values from 0 to 1 relative to 
 
 **Day** scores the variance of the Laplacian of the grayscale ROI. Sharper edges produce a higher variance.
 
-**Night** detects stars in the ROI (pixels more than 5 sigma above the median background) and scores the inverse of their median flux-weighted radius, an approximation of half-flux radius (HFR). The score is `0.0` when fewer than 3 stars are found.
+**Night** detects stars in the ROI (pixels more than 5 sigma above the median background), takes up to 20 of the largest, and measures each star's half-flux radius (HFR) inside a fixed 31 by 31 pixel aperture around its centroid with the local background subtracted. The score is the inverse of the median HFR. The score is `0.0` when fewer than 3 stars are found.
+
+When the best score lands on the first or last sweep position, the status message adds `at edge of range`. Recentre the focuser near the suspected focus or widen `range`, then run again.
 
 A higher score is better in both modes.
 
@@ -358,7 +360,7 @@ The motor service waits up to `(frames + 1) * 65 + 5` seconds for each `/focus_m
 | `range` | 300 | `step` to 5000 | Steps on each side of the start position |
 | `step` | 50 | 1 or more | Steps between measurements |
 | `frames` | 2 | 1 to 10 | Frames captured per position, scores averaged by the camera service |
-| `settle_ms` | 300 | 0 to 10000 | Delay after each move before measuring |
+| `settle_ms` | 300 | 0 to 10000 | Delay after each move before measuring, set from the SETTLE field in the web UI |
 | `backlash` | 50 | 0 to 2000 | Steps overshot below a target before approaching it |
 
 The web interface exposes mode, range, and step. It sends the other values as defaults.

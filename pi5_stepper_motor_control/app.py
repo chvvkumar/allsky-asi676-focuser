@@ -368,7 +368,10 @@ class AutoFocus:
             self._set(phase='finalizing', best_pos=best)
             self._move(best - p['backlash'])
             self._move(best)
-            self._set(running=False, phase='done', message=f"best {best} score {pts[i]['score']}")
+            msg = f"best {best} score {pts[i]['score']:.3g}"
+            if i == 0 or i == len(pts) - 1:
+                msg += " (at edge of range: recentre or widen range)"
+            self._set(running=False, phase='done', message=msg)
         except InterruptedError:
             self._set(running=False, phase='aborted', message=f"aborted at {m.current_pos}")
         except Exception as e:

@@ -209,27 +209,37 @@ def crop_roi(gray, x, y, w, h):
 def day_score(gray_roi):
     return float(cv2.Laplacian(gray_roi, cv2.CV_64F).var())
 
+STAR_WIN = 15   # ponytail: fixed aperture radius (px) for HFR; raise if defocused stars outgrow it
+MAX_STARS = 20
+
 def night_score(gray_roi):
-    # ponytail: flux-weighted mean radius stands in for HFR; replace with true half-flux radius if sweeps come out flat
+    """Median half-flux radius of detected stars, measured in a fixed aperture so defocus cannot shrink it."""
     roi = gray_roi.astype(np.float64)
     med = np.median(roi)
     sigma = max(1.4826 * np.median(np.abs(roi - med)), 1.0)
     mask = (roi > med + 5 * sigma).astype(np.uint8)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    flux_all = np.clip(roi - med, 0, None)
+    n, _, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    H, W = roi.shape
+    r = STAR_WIN
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    cand = sorted(((stats[i][4], i) for i in range(1, n) if 2 <= stats[i][4] <= 1500), reverse=True)
     radii = []
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if not 2 <= area <= 400:
+    for _, i in cand[:MAX_STARS]:
+        cx, cy = int(round(cents[i][0])), int(round(cents[i][1]))
+        if cx - r < 0 or cy - r < 0 or cx + r >= W or cy + r >= H:
             continue
-        flux = flux_all[y:y + h, x:x + w] * (labels[y:y + h, x:x + w] == i)
+        patch = roi[cy - r:cy + r + 1, cx - r:cx + r + 1]
+        bg = np.median(np.concatenate([patch[0], patch[-1], patch[:, 0], patch[:, -1]]))
+        flux = np.clip(patch - bg - 2 * sigma, 0, None)
         total = flux.sum()
         if total <= 0:
             continue
-        yy, xx = np.mgrid[y:y + h, x:x + w]
-        cx = (flux * xx).sum() / total
-        cy = (flux * yy).sum() / total
-        radii.append((flux * np.hypot(xx - cx, yy - cy)).sum() / total)
+        fcx = (flux * xx).sum() / total
+        fcy = (flux * yy).sum() / total
+        d = np.hypot(xx - fcx, yy - fcy).ravel()
+        order = d.argsort()
+        half = np.searchsorted(np.cumsum(flux.ravel()[order]), total / 2)
+        radii.append(d[order][min(half, d.size - 1)])
     if len(radii) >= 3:
         hfr = float(np.median(radii))
         if hfr > 0:

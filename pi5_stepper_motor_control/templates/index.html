@@ -567,6 +567,10 @@
                     <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">STEP</span>
                     <input type="number" id="afStep" value="50" min="1">
                 </div>
+                <div class="speed-control" style="margin-bottom: 12px;">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">SETTLE (ms)</span>
+                    <input type="number" id="afSettle" value="300" min="0" max="10000" step="50">
+                </div>
                 <div class="tools-grid" style="margin-top: 0;">
                     <button class="btn-tool" onclick="startAf()">START AF</button>
                     <button class="btn-tool danger-text" onclick="stopAf()">STOP AF</button>
@@ -913,6 +917,7 @@
 
         // --- Autofocus ---
         let afMode = lsGet('af_mode') === 'night' ? 'night' : 'day';
+        if (lsGet('af_settle') !== null) $('afSettle').value = lsGet('af_settle');
         let afTimer = null;
         let afGraceUntil = 0;
         let afFails = 0;
@@ -927,7 +932,9 @@
         function startAf() {
             vib();
             const body = {roi: roi || {x: 0, y: 0, w: 1, h: 1}, mode: afMode,
-                          range: parseInt($('afRange').value), step: parseInt($('afStep').value)};
+                          range: parseInt($('afRange').value), step: parseInt($('afStep').value),
+                          settle_ms: parseInt($('afSettle').value) || 0};
+            lsSet('af_settle', $('afSettle').value);
             apiCall('/api/autofocus/start', 'POST', body);
             afGraceUntil = Date.now() + 2000; afFails = 0;
             if (!afTimer) afTimer = setInterval(pollAf, 500);
@@ -977,6 +984,17 @@
                 ctx.lineTo(X(best), cv.height - pad);
                 ctx.stroke();
             }
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '10px JetBrains Mono, monospace';
+            ctx.textBaseline = 'bottom';
+            ctx.textAlign = 'left';
+            ctx.fillText(String(x0), pad, cv.height - 1);
+            ctx.textAlign = 'right';
+            ctx.fillText(String(x1), cv.width - pad, cv.height - 1);
+            ctx.textBaseline = 'top';
+            ctx.fillText(y1.toPrecision(3), cv.width - pad, 1);
+            ctx.textAlign = 'left';
+            ctx.fillText(y0.toPrecision(3), pad, 1);
         }
 
         // Init

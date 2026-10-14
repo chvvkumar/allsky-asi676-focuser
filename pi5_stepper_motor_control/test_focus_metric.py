@@ -24,6 +24,8 @@ if __name__ == "__main__":
     sb, _, _ = zwo.night_score(blur)
     assert stars >= 5, stars
     assert sb < s, (sb, s)
+    hfrs = [zwo.night_score(cv2.GaussianBlur(sharp, (0, 0), b))[2] for b in (0.8, 1.5, 2.5, 3.5)]
+    assert hfrs == sorted(hfrs), hfrs
     assert zwo.day_score(sharp) > zwo.day_score(blur)
     assert zwo.crop_roi(sharp, 0.25, 0.25, 0.5, 0.5).shape == (100, 100)
     print("OK")
