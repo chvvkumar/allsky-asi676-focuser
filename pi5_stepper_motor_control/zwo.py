@@ -40,6 +40,9 @@ camera = None
 cam_info = {}
 cam_bin = 1  # hardware bin the camera is currently configured with
 camera_lock = threading.Lock()
+last_gray = None  # latest grayscale frame at binned resolution, for /focus_metric
+last_frame_seq = 0
+frame_cond = threading.Condition()
 
 def bin_for(width, height):
     """Largest supported hardware bin whose full-frame output still covers width x height."""
@@ -73,7 +76,7 @@ def create_error_frame(message):
 # ================= VIDEO STREAMING =================
 
 def generate_frames():
-    global camera, cam_info, cam_bin
+    global camera, cam_info, cam_bin, last_gray, last_frame_seq
     init_error = None
     
     if not camera:
@@ -167,6 +170,11 @@ def generate_frames():
                 color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             else:
                 color_frame = frame  # ASI_IMG_RGB24 is already BGR
+            gray = cv2.cvtColor(color_frame, cv2.COLOR_BGR2GRAY)
+            with frame_cond:
+                last_gray = gray
+                last_frame_seq += 1
+                frame_cond.notify_all()
             color_frame = fit_resize(color_frame, res_width, res_height)
 
             # Resize based on quality setting to improve framerate
@@ -188,6 +196,46 @@ def generate_frames():
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + create_error_frame(e) + b'\r\n')
             time.sleep(0.5)
 
+# ================= FOCUS METRIC =================
+
+def crop_roi(gray, x, y, w, h):
+    H, W = gray.shape[:2]
+    x0 = min(max(0, int(round(x * W))), W - 8)
+    y0 = min(max(0, int(round(y * H))), H - 8)
+    x1 = max(x0 + 8, min(W, int(round((x + w) * W))))
+    y1 = max(y0 + 8, min(H, int(round((y + h) * H))))
+    return gray[y0:y1, x0:x1]
+
+def day_score(gray_roi):
+    return float(cv2.Laplacian(gray_roi, cv2.CV_64F).var())
+
+def night_score(gray_roi):
+    # ponytail: flux-weighted mean radius stands in for HFR; replace with true half-flux radius if sweeps come out flat
+    roi = gray_roi.astype(np.float64)
+    med = np.median(roi)
+    sigma = max(1.4826 * np.median(np.abs(roi - med)), 1.0)
+    mask = (roi > med + 5 * sigma).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    flux_all = np.clip(roi - med, 0, None)
+    radii = []
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if not 2 <= area <= 400:
+            continue
+        flux = flux_all[y:y + h, x:x + w] * (labels[y:y + h, x:x + w] == i)
+        total = flux.sum()
+        if total <= 0:
+            continue
+        yy, xx = np.mgrid[y:y + h, x:x + w]
+        cx = (flux * xx).sum() / total
+        cy = (flux * yy).sum() / total
+        radii.append((flux * np.hypot(xx - cx, yy - cy)).sum() / total)
+    if len(radii) >= 3:
+        hfr = float(np.median(radii))
+        if hfr > 0:
+            return 1.0 / hfr, len(radii), hfr
+    return 0.0, len(radii), None
+
 # ================= ROUTES =================
 
 @app.route('/')
@@ -198,6 +246,44 @@ def index():
 def video_feed():
     logger.info(f"Video feed requested from {request.remote_addr}")
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/focus_metric')
+def focus_metric():
+    try:
+        x = float(request.args.get('x', 0)); y = float(request.args.get('y', 0))
+        w = float(request.args.get('w', 1)); h = float(request.args.get('h', 1))
+        frames = int(request.args.get('frames', 1))
+    except ValueError:
+        return jsonify({"ok": False, "error": "x, y, w, h must be numbers and frames an integer"}), 400
+    mode = request.args.get('mode', 'day')
+    if mode not in ('day', 'night'):
+        return jsonify({"ok": False, "error": "mode must be day or night"}), 400
+    if not (0 <= x <= 1 and 0 <= y <= 1 and w > 0 and h > 0 and x + w <= 1 + 1e-9 and y + h <= 1 + 1e-9):
+        return jsonify({"ok": False, "error": "roi must lie inside [0,1] with w,h > 0"}), 400
+    if not 1 <= frames <= 10:
+        return jsonify({"ok": False, "error": "frames must be 1..10"}), 400
+    if camera is None:
+        return jsonify({"ok": False, "error": "camera not initialized"}), 503
+    with state_lock:
+        exp_ms = cam_state['exposure_val'] if cam_state['exposure_mode'] == 'ms' else cam_state['exposure_val'] / 1000
+    deadline = time.time() + (frames * (exp_ms + 500) + 2000) / 1000
+    grays = []
+    with frame_cond:
+        seen = last_frame_seq
+        while len(grays) < frames:
+            if not frame_cond.wait_for(lambda: last_frame_seq > seen, timeout=max(0, deadline - time.time())):
+                return jsonify({"ok": False, "error": "no frame received in time (stream not running?)"}), 503
+            seen = last_frame_seq
+            grays.append(last_gray)
+    rois = [crop_roi(g, x, y, w, h) for g in grays]
+    if mode == 'day':
+        score = sum(day_score(r) for r in rois) / frames
+        return jsonify({"ok": True, "mode": "day", "score": score, "frames": frames})
+    res = [night_score(r) for r in rois]
+    hfrs = [r[2] for r in res if r[2] is not None]
+    return jsonify({"ok": True, "mode": "night", "score": sum(r[0] for r in res) / frames,
+                    "frames": frames, "stars": int(round(sum(r[1] for r in res) / frames)),
+                    "hfr": sum(hfrs) / len(hfrs) if hfrs else None})
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
