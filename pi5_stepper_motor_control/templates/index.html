@@ -312,6 +312,10 @@
         }
         .btn-tool:hover { background: var(--surface-light); color: var(--text-main); }
         .btn-tool.danger-text { color: var(--danger); }
+        .btn-tool.active { background: var(--primary-dim); color: var(--text-main); border-color: var(--primary); }
+        #roiCanvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 20; pointer-events: none; }
+        #roiCanvas.drawing { pointer-events: auto; cursor: crosshair; }
+        #afChart { width: 100%; height: 100px; background: var(--bg); border-radius: 8px; margin-top: 12px; display: block; }
         
         /* Settings Drawer */
         .settings-toggle {
@@ -479,6 +483,7 @@
             <span class="stream-placeholder">Video Stream Loading...</span>
             <!-- Image source is set via JS to allow correct port -->
             <img id="camStream" alt="Camera Stream" style="z-index: 10;">
+            <canvas id="roiCanvas"></canvas>
         </div>
 
         <!-- Right Column: Camera Controls -->
@@ -540,6 +545,33 @@
                  <div style="font-size: 0.75rem; color: var(--text-muted); text-align: center;">
                     Drag image to Pan
                 </div>
+                <div class="tools-grid">
+                    <button class="btn-tool" id="roiBtn" onclick="toggleRoi()">SET ROI</button>
+                    <button class="btn-tool" onclick="clearRoi()">CLEAR ROI</button>
+                </div>
+            </div>
+
+            <!-- Autofocus Deck -->
+            <div class="control-deck">
+                <div class="deck-header">
+                    <span>AUTOFOCUS</span>
+                    <span id="afStatus" style="font-size: 0.7rem; color: var(--text-muted);">idle</span>
+                </div>
+                <div class="tools-grid" style="margin-top: 0; margin-bottom: 12px;">
+                    <button class="btn-tool" id="afDay" onclick="setAfMode('day')">DAY</button>
+                    <button class="btn-tool" id="afNight" onclick="setAfMode('night')">NIGHT</button>
+                </div>
+                <div class="speed-control" style="margin-bottom: 12px;">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">RANGE</span>
+                    <input type="number" id="afRange" value="300" min="1" max="5000">
+                    <span style="font-size: 0.8rem; color: var(--text-muted); font-weight:600;">STEP</span>
+                    <input type="number" id="afStep" value="50" min="1">
+                </div>
+                <div class="tools-grid" style="margin-top: 0;">
+                    <button class="btn-tool" onclick="startAf()">START AF</button>
+                    <button class="btn-tool danger-text" onclick="stopAf()">STOP AF</button>
+                </div>
+                <canvas id="afChart"></canvas>
             </div>
         </div>
 
@@ -565,6 +597,7 @@
             };
 
             img.onload = () => {
+                drawRoi();
                 $('camStatus').textContent = "ONLINE";
                 $('camStatus').style.color = "var(--success)";
             };
@@ -576,6 +609,8 @@
             window.addEventListener('touchmove', doPan, {passive: false});
             window.addEventListener('mouseup', endPan);
             window.addEventListener('touchend', endPan);
+            img.addEventListener('transitionend', drawRoi);
+            window.addEventListener('resize', drawRoi);
         }
 
         function setCamSettings() {
@@ -626,10 +661,11 @@
         function applyTransform() {
             const img = $('camStream');
             img.style.transform = `scale(${zoomLevel}) translate(${panX}px, ${panY}px)`;
+            drawRoi();
         }
 
         function startPan(e) {
-            if (zoomLevel <= 1.0) return;
+            if (roiMode || zoomLevel <= 1.0) return;
             e.preventDefault();
             isPanning = true;
             const pt = e.touches ? e.touches[0] : e;
@@ -735,12 +771,12 @@
         async function apiCall(endpoint, method = 'POST', body = null, key = null) {
             try {
                 const opts = { method, headers: {'Content-Type': 'application/json'} };
-                if(body !== null) opts.body = JSON.stringify({ [key]: body });
+                if(body !== null) opts.body = JSON.stringify(key === null ? body : { [key]: body });
                 
                 const res = await fetch(endpoint, opts);
                 const data = await res.json();
                 
-                if(data.status === 'success') showToast(data.message, 'success');
+                if(data.status === 'success') showToast(data.message || 'OK', 'success');
                 else showToast(data.message || 'Error', 'error');
                 
                 fetchStatus();
@@ -786,7 +822,160 @@
             setTimeout(() => t.classList.remove('show'), 3000);
         }
 
+        // --- ROI overlay (normalized x,y,w,h of the raw frame) ---
+        const lsGet = k => { try { return localStorage.getItem(k); } catch(e) { return null; } };
+        const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch(e) {} };
+        let roi = null;
+        try { roi = JSON.parse(lsGet('af_roi')); } catch(e) {}
+        if (!roi || !(roi.w > 0 && roi.h > 0)) roi = null;
+        let roiMode = false;
+        let roiDrag = null; // {x0, y0, x1, y1} normalized, while dragging
+
+        // On-screen rect of the visible frame (object-fit: contain inside the transformed img box)
+        function frameRect() {
+            const img = $('camStream');
+            const r = img.getBoundingClientRect();
+            const nw = img.naturalWidth, nh = img.naturalHeight;
+            if (!nw || !nh) return r;
+            const s = Math.min(r.width / nw, r.height / nh);
+            const w = nw * s, h = nh * s;
+            return {left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h};
+        }
+
+        function drawRoi() {
+            const cv = $('roiCanvas');
+            const cr = cv.getBoundingClientRect();
+            if (cv.width !== Math.round(cr.width) || cv.height !== Math.round(cr.height)) {
+                cv.width = Math.round(cr.width); cv.height = Math.round(cr.height);
+            }
+            const ctx = cv.getContext('2d');
+            ctx.clearRect(0, 0, cv.width, cv.height);
+            let b = roi;
+            if (roiDrag) b = {x: Math.min(roiDrag.x0, roiDrag.x1), y: Math.min(roiDrag.y0, roiDrag.y1),
+                              w: Math.abs(roiDrag.x1 - roiDrag.x0), h: Math.abs(roiDrag.y1 - roiDrag.y0)};
+            if (!b) return;
+            const f = frameRect();
+            ctx.strokeStyle = '#e11d48';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(f.left - cr.left + b.x * f.width, f.top - cr.top + b.y * f.height, b.w * f.width, b.h * f.height);
+        }
+
+        function roiPoint(e) {
+            const pt = e.touches ? e.touches[0] : e;
+            const f = frameRect();
+            const c = v => Math.max(0, Math.min(1, v));
+            return {x: c((pt.clientX - f.left) / f.width), y: c((pt.clientY - f.top) / f.height)};
+        }
+
+        function roiDown(e) {
+            if (!roiMode) return;
+            e.preventDefault();
+            const p = roiPoint(e);
+            roiDrag = {x0: p.x, y0: p.y, x1: p.x, y1: p.y};
+        }
+        function roiMove(e) {
+            if (!roiDrag) return;
+            e.preventDefault();
+            const p = roiPoint(e);
+            roiDrag.x1 = p.x; roiDrag.y1 = p.y;
+            drawRoi();
+        }
+        function roiUp() {
+            if (!roiDrag) return;
+            const d = roiDrag;
+            roiDrag = null;
+            const w = Math.max(0.02, Math.abs(d.x1 - d.x0)), h = Math.max(0.02, Math.abs(d.y1 - d.y0));
+            const x = Math.min(Math.min(d.x0, d.x1), 1 - w), y = Math.min(Math.min(d.y0, d.y1), 1 - h);
+            roi = {x, y, w, h};
+            lsSet('af_roi', JSON.stringify(roi));
+            toggleRoi(false);
+        }
+
+        function toggleRoi(on) {
+            roiMode = (typeof on === 'boolean') ? on : !roiMode;
+            $('roiBtn').classList.toggle('active', roiMode);
+            $('roiCanvas').classList.toggle('drawing', roiMode);
+            drawRoi();
+        }
+
+        function clearRoi() {
+            roi = null;
+            lsSet('af_roi', 'null');
+            drawRoi();
+        }
+
+        $('roiCanvas').addEventListener('mousedown', roiDown);
+        $('roiCanvas').addEventListener('touchstart', roiDown, {passive: false});
+        window.addEventListener('mousemove', roiMove);
+        window.addEventListener('touchmove', roiMove, {passive: false});
+        window.addEventListener('mouseup', roiUp);
+        window.addEventListener('touchend', roiUp);
+
+        // --- Autofocus ---
+        let afMode = lsGet('af_mode') === 'night' ? 'night' : 'day';
+        let afTimer = null;
+        let afGraceUntil = 0;
+
+        function setAfMode(m) {
+            afMode = m;
+            lsSet('af_mode', m);
+            $('afDay').classList.toggle('active', m === 'day');
+            $('afNight').classList.toggle('active', m === 'night');
+        }
+
+        function startAf() {
+            vib();
+            const body = {roi: roi || {x: 0, y: 0, w: 1, h: 1}, mode: afMode,
+                          range: parseInt($('afRange').value), step: parseInt($('afStep').value)};
+            apiCall('/api/autofocus/start', 'POST', body);
+            afGraceUntil = Date.now() + 2000;
+            if (!afTimer) afTimer = setInterval(pollAf, 500);
+        }
+
+        function stopAf() { vib(); apiCall('/api/autofocus/stop', 'POST'); }
+
+        async function pollAf() {
+            try {
+                const st = await (await fetch('/api/autofocus/status')).json();
+                $('afStatus').textContent = st.phase + (st.message ? ': ' + st.message : '');
+                drawAfChart(st.points || [], st.best_pos);
+                if (st.running) afGraceUntil = 0;
+                else if (Date.now() > afGraceUntil) stopAfPoll();
+            } catch(e) {
+                if (Date.now() > afGraceUntil) stopAfPoll();
+            }
+        }
+
+        function stopAfPoll() { clearInterval(afTimer); afTimer = null; }
+
+        function drawAfChart(pts, best) {
+            const cv = $('afChart');
+            cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+            const ctx = cv.getContext('2d');
+            ctx.clearRect(0, 0, cv.width, cv.height);
+            if (pts.length < 1) return;
+            const pad = 8;
+            const xs = pts.map(p => p.pos), ys = pts.map(p => p.score);
+            const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+            const X = v => pad + (x1 === x0 ? 0.5 : (v - x0) / (x1 - x0)) * (cv.width - 2 * pad);
+            const Y = v => cv.height - pad - (y1 === y0 ? 0.5 : (v - y0) / (y1 - y0)) * (cv.height - 2 * pad);
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            pts.forEach((p, i) => i ? ctx.lineTo(X(p.pos), Y(p.score)) : ctx.moveTo(X(p.pos), Y(p.score)));
+            ctx.stroke();
+            const bp = pts.find(p => p.pos === best);
+            if (bp) {
+                ctx.fillStyle = '#22c55e';
+                ctx.beginPath();
+                ctx.arc(X(bp.pos), Y(bp.score), 4, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+
         // Init
+        setAfMode(afMode);
+        drawRoi();
         fetchStatus();
         initStream(); // Start Camera connection
     </script>
