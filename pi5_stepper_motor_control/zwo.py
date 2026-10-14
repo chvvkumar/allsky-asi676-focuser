@@ -72,7 +72,7 @@ def create_error_frame(message):
 # ================= VIDEO STREAMING =================
 
 def generate_frames():
-    global camera
+    global camera, cam_info
     init_error = None
     
     if not camera:
