@@ -245,7 +245,8 @@ def fetch_metric(roi, mode, frames):
     q = urllib.parse.urlencode({'x': roi['x'], 'y': roi['y'], 'w': roi['w'], 'h': roi['h'],
                                 'mode': mode, 'frames': frames})
     try:
-        with urllib.request.urlopen(f"{CAM_URL}/focus_metric?{q}", timeout=frames * 6 + 5) as r:
+    # ponytail: timeout assumes night exposures up to 60 s per frame; raise the 65 if longer exposures are used
+        with urllib.request.urlopen(f"{CAM_URL}/focus_metric?{q}", timeout=frames * 65 + 5) as r:
             data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:
@@ -294,9 +295,15 @@ class AutoFocus:
         if not (roi['w'] > 0 and roi['h'] > 0 and roi['x'] >= 0 and roi['y'] >= 0
                 and roi['x'] + roi['w'] <= 1 and roi['y'] + roi['h'] <= 1):
             raise ValueError("roi must be inside 0-1 with w,h > 0")
+        lim = config.get('max_limit', 20000)
+        sp = self.motor.current_pos
+        if sp - p['range'] - p['backlash'] < -lim or sp + p['range'] > lim:
+            raise ValueError("sweep exceeds motor limits")
         with self.lock:
             if self.st['running']:
                 raise RuntimeError("autofocus already running")
+            if self.motor.running or self.motor.target_pos != self.motor.current_pos:
+                raise RuntimeError("motor busy")
             self.abort = False
             self.st = self._idle()
             self.st.update(running=True, phase='sweeping', mode=p['mode'])
@@ -323,6 +330,10 @@ class AutoFocus:
             if time.time() > deadline:
                 raise RuntimeError("motor did not settle")
             time.sleep(0.02)
+        if self.abort:
+            raise InterruptedError
+        if m.current_pos != pos:
+            raise RuntimeError(f"motor stopped at {m.current_pos} instead of {pos}")
 
     def _run(self, p):
         m = self.motor
@@ -343,8 +354,8 @@ class AutoFocus:
                     self.st['index'] += 1
             pts = self.status()['points']
             if all(pt['score'] == 0.0 for pt in pts):
-                self._set(running=False, phase='error', message='no usable signal in ROI')
                 m.set_target(start_pos)
+                self._set(running=False, phase='error', message='no usable signal in ROI')
                 return
             i = max(range(len(pts)), key=lambda k: pts[k]['score'])
             best = pts[i]['pos']
@@ -359,8 +370,7 @@ class AutoFocus:
             self._move(best)
             self._set(running=False, phase='done', message=f"best {best} score {pts[i]['score']}")
         except InterruptedError:
-            m.set_target(start_pos)
-            self._set(running=False, phase='aborted', message='aborted, returning to start')
+            self._set(running=False, phase='aborted', message=f"aborted at {m.current_pos}")
         except Exception as e:
             logger.error(f"Autofocus failed: {e}", exc_info=True)
             m.set_target(start_pos)
