@@ -341,7 +341,13 @@ A higher score is better in both modes.
 4. Select the position with the highest score. If it is not the first or last point, fit a parabola through it and its two neighbors and use the vertex, limited to one step either side of the peak.
 5. Move to the best position minus `backlash`, then to the best position, so the final approach is from below.
 
-If every score is `0.0`, the sweep ends in the `error` phase with the message `no usable signal in ROI` and the motor returns to the start position. Stop requests, errors, and `POST /api/stop` also return the motor to the start position.
+If every score is `0.0`, the sweep ends in the `error` phase with the message `no usable signal in ROI`. Any sweep that ends in the `error` phase returns the motor to the start position.
+
+A stop request (STOP AF, `POST /api/autofocus/stop`, or `POST /api/stop`) ends the sweep in the `aborted` phase with the message `aborted at <pos>` and leaves the motor where it is. `start_pos` in the status response holds the original position, so move back to it manually if needed.
+
+If the motor settles at a position other than the requested one, for example because it reached a travel limit, the sweep ends in the `error` phase.
+
+The motor service waits up to `frames * 65 + 5` seconds for each `/focus_metric` reply, which supports night exposures up to 60 seconds per frame.
 
 ### Parameters
 
@@ -377,11 +383,12 @@ Start a sweep. Only `mode` is required.
 
 **Responses:**
 - 200 `{"status": "success"}`
-- 400 `{"status": "error", "message": "<text>"}` when validation fails
+- 400 `{"status": "error", "message": "<text>"}` when validation fails, including when `start_pos - range - backlash` is below `-max_limit` or `start_pos + range` is above `max_limit`
 - 409 `{"status": "error", "message": "autofocus already running"}`
+- 409 `{"status": "error", "message": "motor busy"}` when the motor is moving or has an unfinished target
 
 #### POST `/api/autofocus/stop`
-Abort the sweep. The motor returns to the start position.
+Abort the sweep. The motor stays at its current position.
 
 **Response:**
 ```json
