@@ -12,6 +12,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Configure logging
 logging.basicConfig(
+    force=True,  # zwoasi logs at import time, which would otherwise make this a no-op
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
@@ -36,7 +37,24 @@ cam_state = {
 state_lock = threading.Lock()
 
 camera = None
+cam_info = {}
 camera_lock = threading.Lock()
+
+def bin_for(width, height):
+    """Largest supported hardware bin whose full-frame output still covers width x height."""
+    best = 1
+    for b in sorted(cam_info.get('SupportedBins', [1])):
+        if cam_info['MaxWidth'] // b >= width and cam_info['MaxHeight'] // b >= height:
+            best = b
+    return best
+
+def fit_resize(img, width, height):
+    """Scale img to fit inside width x height, preserving aspect ratio."""
+    h, w = img.shape[:2]
+    scale = min(width / w, height / h)
+    if scale >= 1.0:
+        return img
+    return cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
 app = Flask(__name__)
 CORS(app)
 
@@ -70,11 +88,13 @@ def generate_frames():
             logger.info(f"Detected {num_cams} ZWO camera(s)")
             if num_cams > 0:
                 camera = asi.Camera(0)
-                # Set initial resolution before starting capture
+                cam_info = camera.get_camera_property()
                 with state_lock:
                     res_width = cam_state.get('resolution_width', 1920)
                     res_height = cam_state.get('resolution_height', 1080)
-                camera.set_roi(width=res_width, height=res_height)
+                # Full sensor field, binned down; output is resized in software, never cropped.
+                # RGB24 so the SDK debayers: binning a RAW bayer frame loses color.
+                camera.set_roi(bins=bin_for(res_width, res_height), image_type=asi.ASI_IMG_RGB24)
                 camera.set_control_value(asi.ASI_HIGH_SPEED_MODE, 1)
                 camera.start_video_capture()
                 logger.info(f"Camera initialized successfully - Resolution: {res_width}x{res_height}, Cameras: {num_cams}")
@@ -96,10 +116,10 @@ def generate_frames():
 
     applied_gain = -1
     applied_exp = -1
-    # Get initial resolution to track changes
     with state_lock:
         applied_width = cam_state.get('resolution_width', 1920)
         applied_height = cam_state.get('resolution_height', 1080)
+    applied_bin = bin_for(applied_width, applied_height)
 
     while True:
         with state_lock:
@@ -115,18 +135,20 @@ def generate_frames():
         try:
             # Apply resolution if changed (only when user actually changes it)
             if res_width != applied_width or res_height != applied_height:
-                try:
-                    logger.info(f"Changing resolution from {applied_width}x{applied_height} to {res_width}x{res_height}")
-                    camera.stop_video_capture()
-                    camera.set_roi(width=res_width, height=res_height)
-                    camera.start_video_capture()
-                    applied_width = res_width
-                    applied_height = res_height
-                    logger.info(f"Resolution changed successfully to {res_width}x{res_height}")
-                    sys.stdout.flush()
-                except Exception as e:
-                    logger.error(f"Resolution change failed: {e}", exc_info=True)
-                    sys.stdout.flush()
+                # Record the request first so a rejected size is not retried every frame
+                applied_width, applied_height = res_width, res_height
+                new_bin = bin_for(res_width, res_height)
+                if new_bin != applied_bin:
+                    try:
+                        logger.info(f"Output {res_width}x{res_height}: switching to bin {new_bin}")
+                        camera.stop_video_capture()
+                        camera.set_roi(bins=new_bin, image_type=asi.ASI_IMG_RGB24)
+                        applied_bin = new_bin
+                    except Exception as e:
+                        logger.error(f"Bin change failed, keeping bin {applied_bin}: {e}")
+                    finally:
+                        # set_roi can raise after stop; capture must restart either way
+                        camera.start_video_capture()
             
             if gain != applied_gain:
                 logger.debug(f"Setting gain: {applied_gain} -> {gain}")
@@ -144,10 +166,11 @@ def generate_frames():
             to_ms = int(target_us / 1000) + 500
             frame = camera.capture_video_frame(timeout=to_ms)
             
-            if len(frame.shape) == 2: 
-                color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-            else: 
-                color_frame = cv2.cvtColor(frame, cv2.COLOR_BAYER_RG2RGB)
+            if len(frame.shape) == 2:
+                color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            else:
+                color_frame = frame  # ASI_IMG_RGB24 is already BGR
+            color_frame = fit_resize(color_frame, res_width, res_height)
 
             # Resize based on quality setting to improve framerate
             # 100 = Original
@@ -163,8 +186,10 @@ def generate_frames():
             ret, buffer = cv2.imencode('.jpg', color_frame, encode_param)
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         except Exception as e:
-            logger.error(f"Frame capture error: {e}", exc_info=True)
-            continue
+            logger.error(f"Frame capture error: {e}")
+            # Yield so a disconnected client raises GeneratorExit instead of looping forever
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + create_error_frame(e) + b'\r\n')
+            time.sleep(0.5)
 
 # ================= ROUTES =================
 
