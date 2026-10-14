@@ -306,6 +306,126 @@ Set steps per full motor rotation (gear ratio dependent).
 
 For 28BYJ-48 with 1/64 gearbox in half-step mode: 4096 steps
 
+## Autofocus
+
+The web interface sweeps the focuser through a range of positions, scores the image sharpness at each position, and moves to the best one. `zwo.py` (port 5000) computes the sharpness score. `app.py` (port 8080) runs the sweep and calls `zwo.py` over HTTP. Set the environment variable `FOCUSER_CAM_URL` to change the camera service address (default `http://127.0.0.1:5000`).
+
+### Requirements and Limitations
+
+- The camera stream must be open in a browser. `zwo.py` captures frames only while a stream client is connected, so `/focus_metric` returns 503 when no stream is running and the sweep ends in the `error` phase.
+- The sweep runs on the Pi after it starts. Closing the control page does not stop it.
+
+### Draw the ROI
+
+1. Open the web interface and start the camera stream.
+2. Select **SET ROI**.
+3. Drag a rectangle over the part of the image to focus on (a star field in night mode, a high-contrast edge in day mode).
+4. Release the pointer. The rectangle is stored in the browser and reused on the next visit.
+5. Select **CLEAR ROI** to remove it. With no ROI set, the web interface uses the full frame.
+
+The ROI is sent as normalized `x`, `y`, `w`, `h` values from 0 to 1 relative to the raw frame, with the origin at the top left. When the API receives no ROI, it uses the center half of the frame (`x=0.25, y=0.25, w=0.5, h=0.5`).
+
+### Day and Night Metrics
+
+**Day** scores the variance of the Laplacian of the grayscale ROI. Sharper edges produce a higher variance.
+
+**Night** detects stars in the ROI (pixels more than 5 sigma above the median background) and scores the inverse of their median flux-weighted radius, an approximation of half-flux radius (HFR). The score is `0.0` when fewer than 3 stars are found.
+
+A higher score is better in both modes.
+
+### Sweep Sequence
+
+1. Record the current position as the start position.
+2. Move to the lowest sweep position minus the backlash value, then to the lowest sweep position (start position minus `range`). Approaching from below removes gear backlash from the first reading.
+3. Step upward by `step` to start position plus `range`. At each position, wait `settle_ms`, then capture `frames` frames and record the score.
+4. Select the position with the highest score. If it is not the first or last point, fit a parabola through it and its two neighbors and use the vertex, limited to one step either side of the peak.
+5. Move to the best position minus `backlash`, then to the best position, so the final approach is from below.
+
+If every score is `0.0`, the sweep ends in the `error` phase with the message `no usable signal in ROI` and the motor returns to the start position. Stop requests, errors, and `POST /api/stop` also return the motor to the start position.
+
+### Parameters
+
+| Parameter | Default | Range | Notes |
+|-----------|---------|-------|-------|
+| `mode` | none (required) | `day`, `night` | Metric selection |
+| `roi` | `{"x":0.25,"y":0.25,"w":0.5,"h":0.5}` | 0 to 1, `w` and `h` above 0 | Normalized, must lie inside the frame |
+| `range` | 300 | `step` to 5000 | Steps on each side of the start position |
+| `step` | 50 | 1 or more | Steps between measurements |
+| `frames` | 2 | 1 to 10 | Frames captured per position, scores averaged by the camera service |
+| `settle_ms` | 300 | 0 to 10000 | Delay after each move before measuring |
+| `backlash` | 50 | 0 to 2000 | Steps overshot below a target before approaching it |
+
+The web interface exposes mode, range, and step. It sends the other values as defaults.
+
+### Autofocus Endpoints
+
+#### POST `/api/autofocus/start`
+Start a sweep. Only `mode` is required.
+
+**Request:**
+```json
+{
+  "roi": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5},
+  "mode": "night",
+  "range": 300,
+  "step": 50,
+  "frames": 2,
+  "settle_ms": 300,
+  "backlash": 50
+}
+```
+
+**Responses:**
+- 200 `{"status": "success"}`
+- 400 `{"status": "error", "message": "<text>"}` when validation fails
+- 409 `{"status": "error", "message": "autofocus already running"}`
+
+#### POST `/api/autofocus/stop`
+Abort the sweep. The motor returns to the start position.
+
+**Response:**
+```json
+{"status": "success"}
+```
+
+#### GET `/api/autofocus/status`
+Return sweep progress. `points` grows as the sweep proceeds.
+
+**Response:**
+```json
+{
+  "running": true,
+  "phase": "sweeping",
+  "mode": "night",
+  "start_pos": 1200,
+  "best_pos": null,
+  "index": 3,
+  "total": 13,
+  "message": "",
+  "points": [
+    {"pos": 900, "score": 0.0, "stars": 1},
+    {"pos": 950, "score": 0.31, "stars": 5}
+  ]
+}
+```
+
+**Fields:**
+- `phase`: `idle`, `sweeping`, `finalizing`, `done`, `error`, or `aborted`
+- `mode`: `day`, `night`, or null before the first run
+- `start_pos`, `best_pos`: integers, null until set
+- `index`, `total`: measurements completed and planned
+- `stars`: star count in night mode, null in day mode
+
+### Camera Service Endpoint
+
+`zwo.py` serves `GET /focus_metric?x=&y=&w=&h=&mode=day|night&frames=N` on port 5000. `app.py` calls it for each measurement.
+
+- It waits for `N` frames captured after the request arrives (default 1, maximum 10).
+- Day response: `{"ok": true, "mode": "day", "score": <float>, "frames": N}`
+- Night response: `{"ok": true, "mode": "night", "score": <float>, "frames": N, "stars": <int>, "hfr": <float|null>}`
+- 503 `{"ok": false, "error": "<text>"}` when no frame arrives in time or the camera is not initialized.
+- 400 `{"ok": false, "error": "<text>"}` on bad parameters.
+
 ## Configuration
 
 ### Configuration File: `config.json`

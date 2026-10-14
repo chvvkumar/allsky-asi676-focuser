@@ -134,6 +134,15 @@ Both versions provide compatible REST APIs:
 | `/api/settings/max` | POST | Set max travel limit `{"maxSteps": 20000}` |
 | `/api/settings/stepsperrot` | POST | Set steps per rotation `{"stepsPerRot": 4096}` |
 
+### Pi5 Additional Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/autofocus/start` | POST | Start a sweep `{"mode": "day", "range": 300, "step": 50}` |
+| `/api/autofocus/stop` | POST | Abort the sweep and return to the start position |
+| `/api/autofocus/status` | GET | Sweep phase, progress, and measured points |
+
+See the [Pi5 README](./pi5_stepper_motor_control/README.md#autofocus) for parameters and responses.
+
 ### ESP32 Additional Endpoints
 | Endpoint | Method | Description |
 |----------|--------|-------------|
