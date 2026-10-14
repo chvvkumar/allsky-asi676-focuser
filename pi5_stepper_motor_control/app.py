@@ -4,6 +4,9 @@ import json
 import os
 import sys
 import logging
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 
@@ -236,7 +239,135 @@ class MotorController:
                               if config.get('max_limit') else 50
             }
 
+CAM_URL = os.environ.get("FOCUSER_CAM_URL", "http://127.0.0.1:5000")
+
+def fetch_metric(roi, mode, frames):
+    q = urllib.parse.urlencode({'x': roi['x'], 'y': roi['y'], 'w': roi['w'], 'h': roi['h'],
+                                'mode': mode, 'frames': frames})
+    try:
+        with urllib.request.urlopen(f"{CAM_URL}/focus_metric?{q}", timeout=frames * 6 + 5) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get('error', str(e))
+        except Exception:
+            msg = str(e)
+        raise RuntimeError(msg)
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"camera unreachable: {e.reason}")
+    if not data.get('ok'):
+        raise RuntimeError(data.get('error', 'focus metric failed'))
+    return data
+
+# --- Autofocus ---
+class AutoFocus:
+    def __init__(self, motor, metric_fn):
+        self.motor = motor
+        self.metric_fn = metric_fn
+        self.lock = threading.Lock()
+        self.abort = False
+        self.st = self._idle()
+
+    @staticmethod
+    def _idle():
+        return {'running': False, 'phase': 'idle', 'mode': None, 'start_pos': None, 'best_pos': None,
+                'index': 0, 'total': 0, 'message': '', 'points': []}
+
+    def start(self, params):
+        p = {'roi': {'x': 0.25, 'y': 0.25, 'w': 0.5, 'h': 0.5}, 'range': 300, 'step': 50,
+             'frames': 2, 'settle_ms': 300, 'backlash': 50}
+        p.update(params)
+        try:
+            roi = {k: float(p['roi'][k]) for k in 'xywh'}
+            for k in ('range', 'step', 'frames', 'settle_ms', 'backlash'):
+                p[k] = int(p[k])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("invalid roi or numeric parameter")
+        p['roi'] = roi
+        if p.get('mode') not in ('day', 'night'):
+            raise ValueError("mode must be day or night")
+        if p['step'] < 1: raise ValueError("step must be >= 1")
+        if not p['step'] <= p['range'] <= 5000: raise ValueError("range must be between step and 5000")
+        if not 1 <= p['frames'] <= 10: raise ValueError("frames must be 1-10")
+        if not 0 <= p['settle_ms'] <= 10000: raise ValueError("settle_ms must be 0-10000")
+        if not 0 <= p['backlash'] <= 2000: raise ValueError("backlash must be 0-2000")
+        if not (roi['w'] > 0 and roi['h'] > 0 and roi['x'] >= 0 and roi['y'] >= 0
+                and roi['x'] + roi['w'] <= 1 and roi['y'] + roi['h'] <= 1):
+            raise ValueError("roi must be inside 0-1 with w,h > 0")
+        with self.lock:
+            if self.st['running']:
+                raise RuntimeError("autofocus already running")
+            self.abort = False
+            self.st = self._idle()
+            self.st.update(running=True, phase='sweeping', mode=p['mode'])
+        threading.Thread(target=self._run, args=(p,), daemon=True).start()
+
+    def stop(self):
+        self.abort = True
+
+    def status(self):
+        with self.lock:
+            return dict(self.st, points=list(self.st['points']))
+
+    def _set(self, **kw):
+        with self.lock:
+            self.st.update(kw)
+
+    def _move(self, pos):
+        if self.abort:
+            raise InterruptedError
+        m = self.motor
+        m.set_target(pos)
+        deadline = time.time() + abs(pos - m.current_pos) * 0.6 / max(m.speed, 1) + 5
+        while not (m.target_pos == m.current_pos and not m.running):
+            if time.time() > deadline:
+                raise RuntimeError("motor did not settle")
+            time.sleep(0.02)
+
+    def _run(self, p):
+        m = self.motor
+        start_pos = m.current_pos
+        try:
+            # ponytail: single pass + parabola; upgrade to coarse/fine two-pass if backlash exceeds step
+            positions = list(range(start_pos - p['range'], start_pos + p['range'] + 1, p['step']))
+            self._set(start_pos=start_pos, total=len(positions))
+            self._move(positions[0] - p['backlash'])
+            for pos in positions:
+                self._move(pos)
+                time.sleep(p['settle_ms'] / 1000)
+                r = self.metric_fn(p['roi'], p['mode'], p['frames'])
+                if self.abort:
+                    raise InterruptedError
+                with self.lock:
+                    self.st['points'].append({'pos': pos, 'score': float(r['score']), 'stars': r.get('stars')})
+                    self.st['index'] += 1
+            pts = self.status()['points']
+            if all(pt['score'] == 0.0 for pt in pts):
+                self._set(running=False, phase='error', message='no usable signal in ROI')
+                m.set_target(start_pos)
+                return
+            i = max(range(len(pts)), key=lambda k: pts[k]['score'])
+            best = pts[i]['pos']
+            if 0 < i < len(pts) - 1:
+                y0, y1, y2 = pts[i - 1]['score'], pts[i]['score'], pts[i + 1]['score']
+                d = y0 - 2 * y1 + y2
+                if d < 0:
+                    best = int(round(min(max(best + p['step'] * 0.5 * (y0 - y2) / d,
+                                             best - p['step']), best + p['step'])))
+            self._set(phase='finalizing', best_pos=best)
+            self._move(best - p['backlash'])
+            self._move(best)
+            self._set(running=False, phase='done', message=f"best {best} score {pts[i]['score']}")
+        except InterruptedError:
+            m.set_target(start_pos)
+            self._set(running=False, phase='aborted', message='aborted, returning to start')
+        except Exception as e:
+            logger.error(f"Autofocus failed: {e}", exc_info=True)
+            m.set_target(start_pos)
+            self._set(running=False, phase='error', message=str(e))
+
 motor = MotorController()
+autofocus = AutoFocus(motor, fetch_metric)
 app = Flask(__name__)
 
 # --- Routes ---
@@ -252,8 +383,28 @@ def get_status():
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
     logger.info(f"API: Stop requested from {request.remote_addr}")
+    autofocus.stop()
     motor.stop()
     return jsonify({'status': 'success', 'message': 'Motor stopped'})
+
+@app.route('/api/autofocus/start', methods=['POST'])
+def api_autofocus_start():
+    try:
+        autofocus.start(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 409
+    return jsonify({'status': 'success'})
+
+@app.route('/api/autofocus/stop', methods=['POST'])
+def api_autofocus_stop():
+    autofocus.stop()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/autofocus/status', methods=['GET'])
+def api_autofocus_status():
+    return jsonify(autofocus.status())
 
 @app.route('/api/nudge', methods=['POST'])
 def api_nudge():
