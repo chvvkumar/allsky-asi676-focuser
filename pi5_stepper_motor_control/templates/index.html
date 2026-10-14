@@ -915,6 +915,7 @@
         let afMode = lsGet('af_mode') === 'night' ? 'night' : 'day';
         let afTimer = null;
         let afGraceUntil = 0;
+        let afFails = 0;
 
         function setAfMode(m) {
             afMode = m;
@@ -928,7 +929,7 @@
             const body = {roi: roi || {x: 0, y: 0, w: 1, h: 1}, mode: afMode,
                           range: parseInt($('afRange').value), step: parseInt($('afStep').value)};
             apiCall('/api/autofocus/start', 'POST', body);
-            afGraceUntil = Date.now() + 2000;
+            afGraceUntil = Date.now() + 2000; afFails = 0;
             if (!afTimer) afTimer = setInterval(pollAf, 500);
         }
 
@@ -937,12 +938,16 @@
         async function pollAf() {
             try {
                 const st = await (await fetch('/api/autofocus/status')).json();
+                afFails = 0;
                 $('afStatus').textContent = st.phase + (st.message ? ': ' + st.message : '');
                 drawAfChart(st.points || [], st.best_pos);
                 if (st.running) afGraceUntil = 0;
                 else if (Date.now() > afGraceUntil) stopAfPoll();
             } catch(e) {
-                if (Date.now() > afGraceUntil) stopAfPoll();
+                if (Date.now() > afGraceUntil && ++afFails >= 3) {
+                    $('afStatus').textContent = 'status unavailable';
+                    stopAfPoll();
+                }
             }
         }
 
@@ -964,12 +969,13 @@
             ctx.beginPath();
             pts.forEach((p, i) => i ? ctx.lineTo(X(p.pos), Y(p.score)) : ctx.moveTo(X(p.pos), Y(p.score)));
             ctx.stroke();
-            const bp = pts.find(p => p.pos === best);
-            if (bp) {
-                ctx.fillStyle = '#22c55e';
+            if (best != null) {
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 2;
                 ctx.beginPath();
-                ctx.arc(X(bp.pos), Y(bp.score), 4, 0, 2 * Math.PI);
-                ctx.fill();
+                ctx.moveTo(X(best), pad);
+                ctx.lineTo(X(best), cv.height - pad);
+                ctx.stroke();
             }
         }
 

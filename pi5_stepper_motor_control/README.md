@@ -313,7 +313,7 @@ The web interface sweeps the focuser through a range of positions, scores the im
 ### Requirements and Limitations
 
 - The camera stream must be open in a browser. `zwo.py` captures frames only while a stream client is connected, so `/focus_metric` returns 503 when no stream is running and the sweep ends in the `error` phase.
-- The sweep runs on the Pi after it starts. Closing the control page does not stop it.
+- The sweep runs on the Pi but needs the open camera stream. Closing the control page closes the stream, the next metric call times out, the run ends in the `error` phase, and the motor returns to `start_pos`. A phone that locks its screen has the same effect.
 
 ### Draw the ROI
 
@@ -347,7 +347,7 @@ A stop request (STOP AF, `POST /api/autofocus/stop`, or `POST /api/stop`) ends t
 
 If the motor settles at a position other than the requested one, for example because it reached a travel limit, the sweep ends in the `error` phase.
 
-The motor service waits up to `frames * 65 + 5` seconds for each `/focus_metric` reply, which supports night exposures up to 60 seconds per frame.
+The motor service waits up to `(frames + 1) * 65 + 5` seconds for each `/focus_metric` reply, which supports night exposures up to 60 seconds per frame, including the one discarded frame.
 
 ### Parameters
 
@@ -427,7 +427,7 @@ Return sweep progress. `points` grows as the sweep proceeds.
 
 `zwo.py` serves `GET /focus_metric?x=&y=&w=&h=&mode=day|night&frames=N` on port 5000. `app.py` calls it for each measurement.
 
-- It waits for `N` frames captured after the request arrives (default 1, maximum 10).
+- It discards the first frame to finish after the request arrives, because that frame was exposing during the motor move, then scores the next `N` frames (default 1, maximum 10). The wait deadline is `(N + 1) * (exposure_ms + 500) + 2000` ms.
 - Day response: `{"ok": true, "mode": "day", "score": <float>, "frames": N}`
 - Night response: `{"ok": true, "mode": "night", "score": <float>, "frames": N, "stars": <int>, "hfr": <float|null>}`
 - 503 `{"ok": false, "error": "<text>"}` when no frame arrives in time or the camera is not initialized.

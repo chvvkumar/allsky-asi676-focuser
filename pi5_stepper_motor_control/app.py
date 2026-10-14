@@ -246,7 +246,7 @@ def fetch_metric(roi, mode, frames):
                                 'mode': mode, 'frames': frames})
     try:
     # ponytail: timeout assumes night exposures up to 60 s per frame; raise the 65 if longer exposures are used
-        with urllib.request.urlopen(f"{CAM_URL}/focus_metric?{q}", timeout=frames * 65 + 5) as r:
+        with urllib.request.urlopen(f"{CAM_URL}/focus_metric?{q}", timeout=(frames + 1) * 65 + 5) as r:
             data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:

@@ -266,15 +266,18 @@ def focus_metric():
         return jsonify({"ok": False, "error": "camera not initialized"}), 503
     with state_lock:
         exp_ms = cam_state['exposure_val'] if cam_state['exposure_mode'] == 'ms' else cam_state['exposure_val'] / 1000
-    deadline = time.time() + (frames * (exp_ms + 500) + 2000) / 1000
+    deadline = time.time() + ((frames + 1) * (exp_ms + 500) + 2000) / 1000
     grays = []
+    discarded = False
     with frame_cond:
         seen = last_frame_seq
         while len(grays) < frames:
             if not frame_cond.wait_for(lambda: last_frame_seq > seen, timeout=max(0, deadline - time.time())):
                 return jsonify({"ok": False, "error": "no frame received in time (stream not running?)"}), 503
             seen = last_frame_seq
-            grays.append(last_gray)
+            if discarded:
+                grays.append(last_gray)
+            discarded = True  # first frame was exposing during the motor move
     rois = [crop_roi(g, x, y, w, h) for g in grays]
     if mode == 'day':
         score = sum(day_score(r) for r in rois) / frames
