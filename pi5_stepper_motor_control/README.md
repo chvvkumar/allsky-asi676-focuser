@@ -407,7 +407,7 @@ systemctl show pi5-focuser
 | Max Limit | ±20,000 | Any positive int | Travel limit in both directions |
 | Steps/Rotation | 4,096 | Any positive int | 28BYJ-48 half-step with 1/64 gear |
 | Speed | 250 steps/sec | 50-600 | Startup speed |
-| Port | 8080 | 1-65535 | Web server port |
+| Port | 8080 | 1-65535 | Web server port, override with `FOCUSER_PORT` env var |
 | Log File | motor_control.log | - | Created in app directory |
 
 ## Troubleshooting
@@ -605,10 +605,12 @@ sudo systemctl restart pi5-focuser
 
 ### Change Web Server Port
 
-Edit `app.py` at the bottom:
+Set the `FOCUSER_PORT` environment variable. For the systemd service, add a drop-in so `install.sh` re-runs keep it:
 
-```python
-app.run(host='0.0.0.0', port=8080, debug=False)  # Change port here
+```bash
+sudo mkdir -p /etc/systemd/system/pi5-focuser.service.d
+printf "[Service]\nEnvironment=FOCUSER_PORT=8081\n" | sudo tee /etc/systemd/system/pi5-focuser.service.d/port.conf
+sudo systemctl daemon-reload && sudo systemctl restart pi5-focuser
 ```
 
 ### Integration with AllSky Camera
