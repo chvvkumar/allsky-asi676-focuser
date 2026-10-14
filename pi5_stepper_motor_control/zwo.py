@@ -38,6 +38,7 @@ state_lock = threading.Lock()
 
 camera = None
 cam_info = {}
+cam_bin = 1  # hardware bin the camera is currently configured with
 camera_lock = threading.Lock()
 
 def bin_for(width, height):
@@ -72,7 +73,7 @@ def create_error_frame(message):
 # ================= VIDEO STREAMING =================
 
 def generate_frames():
-    global camera, cam_info
+    global camera, cam_info, cam_bin
     init_error = None
     
     if not camera:
@@ -94,7 +95,8 @@ def generate_frames():
                     res_height = cam_state.get('resolution_height', 1080)
                 # Full sensor field, binned down; output is resized in software, never cropped.
                 # RGB24 so the SDK debayers: binning a RAW bayer frame loses color.
-                camera.set_roi(bins=bin_for(res_width, res_height), image_type=asi.ASI_IMG_RGB24)
+                cam_bin = bin_for(res_width, res_height)
+                camera.set_roi(bins=cam_bin, image_type=asi.ASI_IMG_RGB24)
                 camera.set_control_value(asi.ASI_HIGH_SPEED_MODE, 1)
                 camera.start_video_capture()
                 logger.info(f"Camera initialized successfully - Resolution: {res_width}x{res_height}, Cameras: {num_cams}")
@@ -116,10 +118,6 @@ def generate_frames():
 
     applied_gain = -1
     applied_exp = -1
-    with state_lock:
-        applied_width = cam_state.get('resolution_width', 1920)
-        applied_height = cam_state.get('resolution_height', 1080)
-    applied_bin = bin_for(applied_width, applied_height)
 
     while True:
         with state_lock:
@@ -134,20 +132,19 @@ def generate_frames():
         
         try:
             # Apply resolution if changed (only when user actually changes it)
-            if res_width != applied_width or res_height != applied_height:
-                # Record the request first so a rejected size is not retried every frame
-                applied_width, applied_height = res_width, res_height
-                new_bin = bin_for(res_width, res_height)
-                if new_bin != applied_bin:
+            new_bin = bin_for(res_width, res_height)
+            if new_bin != cam_bin:
+                with camera_lock:
                     try:
                         logger.info(f"Output {res_width}x{res_height}: switching to bin {new_bin}")
                         camera.stop_video_capture()
                         camera.set_roi(bins=new_bin, image_type=asi.ASI_IMG_RGB24)
-                        applied_bin = new_bin
                     except Exception as e:
-                        logger.error(f"Bin change failed, keeping bin {applied_bin}: {e}")
+                        logger.error(f"Bin change to {new_bin} failed: {e}")
                     finally:
-                        # set_roi can raise after stop; capture must restart either way
+                        # set_roi can raise after stop; capture must restart either way.
+                        # Record the bin regardless so a failure is not retried every frame.
+                        cam_bin = new_bin
                         camera.start_video_capture()
             
             if gain != applied_gain:
